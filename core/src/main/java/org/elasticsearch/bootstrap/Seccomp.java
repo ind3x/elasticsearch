@@ -245,7 +245,7 @@ final class Seccomp {
         m.put("i386",  new Arch(0x40000003, 0xFFFFFFFF, 2, 190, 11, 358, 354));
         // ARM syscall number ref based on kernel 4.6
         // https://github.com/torvalds/linux/blob/v4.6/arch/arm/kernel/calls.S
-        m.put("arm", new Arch(0x40000040, 0xFFFFFFFF, 2, 190, 11, 387, 383));
+        m.put("arm", new Arch(0x40000028, 0xFFFFFFFF, 2, 190, 11, 387, 383));
         ARCHITECTURES = Collections.unmodifiableMap(m);
     }
 

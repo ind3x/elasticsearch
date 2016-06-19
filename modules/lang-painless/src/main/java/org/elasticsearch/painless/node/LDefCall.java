@@ -20,11 +20,14 @@
 package org.elasticsearch.painless.node;
 
 import org.elasticsearch.painless.Definition;
+import org.elasticsearch.painless.Globals;
 import org.elasticsearch.painless.Location;
 import org.elasticsearch.painless.DefBootstrap;
 import org.elasticsearch.painless.Locals;
 import org.elasticsearch.painless.MethodWriter;
+import org.objectweb.asm.Type;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.elasticsearch.painless.WriterConstants.DEF_BOOTSTRAP_HANDLE;
@@ -37,6 +40,7 @@ final class LDefCall extends ALink implements IDefLink {
     final String name;
     final List<AExpression> arguments;
     long recipe;
+    List<String> pointers = new ArrayList<>();
 
     LDefCall(Location location, String name, List<AExpression> arguments) {
         super(location, -1);
@@ -59,14 +63,16 @@ final class LDefCall extends ALink implements IDefLink {
         for (int argument = 0; argument < arguments.size(); ++argument) {
             AExpression expression = arguments.get(argument);
 
-            if (expression instanceof EFunctionRef) {
-                recipe |= (1L << (argument + totalCaptures)); // mark argument as deferred reference
-            } else if (expression instanceof ECapturingFunctionRef) {
-                recipe |= (1L << (argument + totalCaptures)); // mark argument as deferred reference
-                totalCaptures++;
-            }
             expression.internal = true;
             expression.analyze(locals);
+
+            if (expression instanceof ILambda) {
+                ILambda lambda = (ILambda) expression;
+                pointers.add(lambda.getPointer());
+                recipe |= (1L << (argument + totalCaptures)); // mark argument as deferred reference
+                totalCaptures += lambda.getCaptureCount();
+            }
+
             expression.expected = expression.actual;
             arguments.set(argument, expression.cast(locals));
         }
@@ -78,12 +84,12 @@ final class LDefCall extends ALink implements IDefLink {
     }
 
     @Override
-    void write(MethodWriter writer) {
+    void write(MethodWriter writer, Globals globals) {
         // Do nothing.
     }
 
     @Override
-    void load(MethodWriter writer) {
+    void load(MethodWriter writer, Globals globals) {
         writer.writeDebugInfo(location);
 
         StringBuilder signature = new StringBuilder();
@@ -94,22 +100,28 @@ final class LDefCall extends ALink implements IDefLink {
 
         for (AExpression argument : arguments) {
             signature.append(argument.actual.type.getDescriptor());
-            if (argument instanceof ECapturingFunctionRef) {
-                ECapturingFunctionRef capturingRef = (ECapturingFunctionRef) argument;
-                signature.append(capturingRef.captured.type.type.getDescriptor());
+            if (argument instanceof ILambda) {
+                ILambda lambda = (ILambda) argument;
+                for (Type capture : lambda.getCaptures()) {
+                    signature.append(capture.getDescriptor());
+                }
             }
-            argument.write(writer);
+            argument.write(writer, globals);
         }
 
         signature.append(')');
         // return value
         signature.append(after.type.getDescriptor());
 
-        writer.invokeDynamic(name, signature.toString(), DEF_BOOTSTRAP_HANDLE, (Object)DefBootstrap.METHOD_CALL, recipe);
+        List<Object> args = new ArrayList<>();
+        args.add(DefBootstrap.METHOD_CALL);
+        args.add(recipe);
+        args.addAll(pointers);
+        writer.invokeDynamic(name, signature.toString(), DEF_BOOTSTRAP_HANDLE, args.toArray());
     }
 
     @Override
-    void store(MethodWriter writer) {
+    void store(MethodWriter writer, Globals globals) {
         throw createError(new IllegalStateException("Illegal tree structure."));
     }
 }

@@ -36,7 +36,6 @@ import org.apache.lucene.util.TestUtil;
 import org.apache.lucene.util.TimeUnits;
 import org.elasticsearch.Version;
 import org.elasticsearch.bootstrap.BootstrapForTesting;
-import org.elasticsearch.common.util.MockPageCacheRecycler;
 import org.elasticsearch.client.Requests;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.common.bytes.BytesReference;
@@ -47,6 +46,7 @@ import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.settings.SettingsModule;
 import org.elasticsearch.common.util.MockBigArrays;
+import org.elasticsearch.common.util.MockPageCacheRecycler;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.common.xcontent.XContentParser;
@@ -57,6 +57,12 @@ import org.elasticsearch.index.Index;
 import org.elasticsearch.index.analysis.AnalysisService;
 import org.elasticsearch.indices.IndicesService;
 import org.elasticsearch.indices.analysis.AnalysisModule;
+import org.elasticsearch.script.MockScriptEngine;
+import org.elasticsearch.script.ScriptContextRegistry;
+import org.elasticsearch.script.ScriptEngineRegistry;
+import org.elasticsearch.script.ScriptModule;
+import org.elasticsearch.script.ScriptService;
+import org.elasticsearch.script.ScriptSettings;
 import org.elasticsearch.search.MockSearchService;
 import org.elasticsearch.test.junit.listeners.LoggingListener;
 import org.elasticsearch.test.junit.listeners.ReproduceInfoPrinter;
@@ -326,6 +332,11 @@ public abstract class ESTestCase extends LuceneTestCase {
     /** Pick a random object from the given list. */
     public static <T> T randomFrom(List<T> list) {
         return RandomPicks.randomFrom(random(), list);
+    }
+
+    /** Pick a random object from the given collection. */
+    public static <T> T randomFrom(Collection<T> collection) {
+        return RandomPicks.randomFrom(random(), collection);
     }
 
     public static String randomAsciiOfLengthBetween(int minCodeUnits, int maxCodeUnits) {
@@ -767,9 +778,31 @@ public abstract class ESTestCase extends LuceneTestCase {
         for (Consumer<AnalysisModule> consumer : moduleConsumers) {
             consumer.accept(analysisModule);
         }
-        SettingsModule settingsModule = new SettingsModule(nodeSettings);
-        settingsModule.registerSetting(InternalSettingsPlugin.VERSION_CREATED);
+        SettingsModule settingsModule = new SettingsModule(nodeSettings, InternalSettingsPlugin.VERSION_CREATED);
         final AnalysisService analysisService = analysisModule.buildRegistry().build(IndexSettingsModule.newIndexSettings(index, indexSettings));
         return analysisService;
+    }
+
+    public static ScriptModule newTestScriptModule() {
+        return new ScriptModule(new MockScriptEngine()) {
+            @Override
+            protected void configure() {
+                Settings settings = Settings.builder()
+                    .put(Environment.PATH_HOME_SETTING.getKey(), createTempDir())
+                    // no file watching, so we don't need a ResourceWatcherService
+                    .put(ScriptService.SCRIPT_AUTO_RELOAD_ENABLED_SETTING.getKey(), false)
+                    .build();
+                bind(ScriptEngineRegistry.class).toInstance(scriptEngineRegistry);
+                bind(ScriptContextRegistry.class).toInstance(scriptContextRegistry);
+                bind(ScriptSettings.class).toInstance(scriptSettings);
+                try {
+                    ScriptService scriptService = new ScriptService(settings, new Environment(settings), null,
+                        scriptEngineRegistry, scriptContextRegistry, scriptSettings);
+                    bind(ScriptService.class).toInstance(scriptService);
+                } catch (IOException e) {
+                    throw new IllegalStateException("error while binding ScriptService", e);
+                }
+            }
+        };
     }
 }

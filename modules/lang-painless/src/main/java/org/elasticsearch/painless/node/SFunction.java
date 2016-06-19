@@ -19,26 +19,30 @@
 
 package org.elasticsearch.painless.node;
 
+import org.elasticsearch.painless.Constant;
 import org.elasticsearch.painless.Def;
 import org.elasticsearch.painless.Definition;
+import org.elasticsearch.painless.Globals;
 import org.elasticsearch.painless.Definition.Method;
 import org.elasticsearch.painless.Definition.Sort;
 import org.elasticsearch.painless.Definition.Type;
 import org.elasticsearch.painless.Locals;
 import org.elasticsearch.painless.Locals.Parameter;
-import org.elasticsearch.painless.Locals.FunctionReserved;
 import org.elasticsearch.painless.Locals.Variable;
 import org.elasticsearch.painless.Location;
 import org.elasticsearch.painless.MethodWriter;
-import org.objectweb.asm.ClassWriter;
+import org.elasticsearch.painless.WriterConstants;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
-import java.util.BitSet;
 import java.util.Collections;
 import java.util.List;
+
+import static org.elasticsearch.painless.WriterConstants.CLASS_TYPE;
 
 /**
  * Represents a user-defined function.
@@ -46,19 +50,21 @@ import java.util.List;
 public class SFunction extends AStatement {
     final FunctionReserved reserved;
     final String rtnTypeStr;
-    final String name;
+    public final String name;
     final List<String> paramTypeStrs;
     final List<String> paramNameStrs;
     final List<AStatement> statements;
+    public final boolean synthetic;
 
     Type rtnType = null;
     List<Parameter> parameters = new ArrayList<>();
     Method method = null;
 
-    Locals locals = null;
+    Variable loop = null;
 
     public SFunction(FunctionReserved reserved, Location location,
-                     String rtnType, String name, List<String> paramTypes, List<String> paramNames, List<AStatement> statements) {
+                     String rtnType, String name, List<String> paramTypes, 
+                     List<String> paramNames, List<AStatement> statements, boolean synthetic) {
         super(location);
 
         this.reserved = reserved;
@@ -67,6 +73,7 @@ public class SFunction extends AStatement {
         this.paramTypeStrs = Collections.unmodifiableList(paramTypes);
         this.paramNameStrs = Collections.unmodifiableList(paramNames);
         this.statements = Collections.unmodifiableList(statements);
+        this.synthetic = synthetic;
     }
 
     void generate() {
@@ -107,10 +114,7 @@ public class SFunction extends AStatement {
             throw createError(new IllegalArgumentException("Cannot generate an empty function [" + name + "]."));
         }
 
-        this.locals = new Locals(reserved, locals, rtnType, parameters);
-        locals = this.locals;
-
-        locals.incrementScope();
+        locals = Locals.newLocalScope(locals);
 
         AStatement last = statements.get(statements.size() - 1);
 
@@ -133,30 +137,33 @@ public class SFunction extends AStatement {
             throw createError(new IllegalArgumentException("Not all paths provide a return value for method [" + name + "]."));
         }
 
-        locals.decrementScope();
+        if (reserved.getMaxLoopCounter() > 0) {
+            loop = locals.getVariable(null, FunctionReserved.LOOP);
+        }
     }
     
-    /** Writes the function to given ClassWriter. */
-    void write (ClassWriter writer, BitSet statements) {
-        final MethodWriter function = new MethodWriter(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC, method.method, writer, statements);
-        write(function);
+    /** Writes the function to given ClassVisitor. */
+    void write (ClassVisitor writer, Globals globals) {
+        int access = Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC;
+        if (synthetic) {
+            access |= Opcodes.ACC_SYNTHETIC;
+        }
+        final MethodWriter function = new MethodWriter(access, method.method, writer, globals.getStatements());
+        write(function, globals);
         function.endMethod();
     }
 
     @Override
-    void write(MethodWriter function) {
+    void write(MethodWriter function, Globals globals) {
         if (reserved.getMaxLoopCounter() > 0) {
             // if there is infinite loop protection, we do this once:
             // int #loop = settings.getMaxLoopCounter()
-
-            Variable loop = locals.getVariable(null, FunctionReserved.LOOP);
-
             function.push(reserved.getMaxLoopCounter());
-            function.visitVarInsn(Opcodes.ISTORE, loop.slot);
+            function.visitVarInsn(Opcodes.ISTORE, loop.getSlot());
         }
 
         for (AStatement statement : statements) {
-            statement.write(function);
+            statement.write(function, globals);
         }
 
         if (!methodEscape) {
@@ -166,9 +173,57 @@ public class SFunction extends AStatement {
                 throw createError(new IllegalStateException("Illegal tree structure."));
             }
         }
+
+        String staticHandleFieldName = Def.getUserFunctionHandleFieldName(name, parameters.size());
+        globals.addConstantInitializer(new Constant(location, WriterConstants.METHOD_HANDLE_TYPE, 
+                                                    staticHandleFieldName, this::initializeConstant));
+    }
+
+    private void initializeConstant(MethodWriter writer) {
+        final Handle handle = new Handle(Opcodes.H_INVOKESTATIC,
+                CLASS_TYPE.getInternalName(),
+                name,
+                method.method.getDescriptor(),
+                false);
+        writer.push(handle);
     }
     
-    String getStaticHandleFieldName() {
-        return Def.getUserFunctionHandleFieldName(name, parameters.size());
+    /**
+     * Tracks reserved variables.  Must be given to any source of input
+     * prior to beginning the analysis phase so that reserved variables
+     * are known ahead of time to assign appropriate slots without
+     * being wasteful.
+     */
+    public interface Reserved {
+        void markReserved(String name);
+        boolean isReserved(String name);
+
+        void setMaxLoopCounter(int max);
+        int getMaxLoopCounter();
+    }
+    
+    public static final class FunctionReserved implements Reserved {
+        public static final String THIS = "#this";
+        public static final String LOOP = "#loop";
+
+        private int maxLoopCounter = 0;
+
+        public void markReserved(String name) {
+            // Do nothing.
+        }
+
+        public boolean isReserved(String name) {
+            return name.equals(THIS) || name.equals(LOOP);
+        }
+
+        @Override
+        public void setMaxLoopCounter(int max) {
+            maxLoopCounter = max;
+        }
+
+        @Override
+        public int getMaxLoopCounter() {
+            return maxLoopCounter;
+        }
     }
 }

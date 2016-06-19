@@ -24,6 +24,7 @@ import java.util.Arrays;
 import java.util.Collections;
 
 import static java.util.Collections.emptyMap;
+import static org.hamcrest.Matchers.containsString;
 
 public class WhenThingsGoWrongTests extends ScriptTestCase {
     public void testNullPointer() {
@@ -210,5 +211,11 @@ public class WhenThingsGoWrongTests extends ScriptTestCase {
             exec("def i = 1} return 1", emptyMap(), emptyMap(), null);
         });
         assertEquals("invalid sequence of tokens near ['}'].", e.getMessage());
+    }
+
+    public void testBadBoxingCast() {
+        expectScriptThrows(ClassCastException.class, () -> {
+            exec("BitSet bs = new BitSet(); bs.and(2);");
+        });
     }
 }

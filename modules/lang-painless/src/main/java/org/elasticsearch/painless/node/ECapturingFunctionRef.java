@@ -22,6 +22,7 @@ package org.elasticsearch.painless.node;
 import org.elasticsearch.painless.DefBootstrap;
 import org.elasticsearch.painless.Definition;
 import org.elasticsearch.painless.FunctionRef;
+import org.elasticsearch.painless.Globals;
 import org.elasticsearch.painless.Location;
 import org.elasticsearch.painless.MethodWriter;
 import org.elasticsearch.painless.Locals;
@@ -37,13 +38,13 @@ import java.lang.invoke.LambdaMetafactory;
 /**
  * Represents a capturing function reference.
  */
-public class ECapturingFunctionRef extends AExpression {
+public class ECapturingFunctionRef extends AExpression implements ILambda {
     public final String type;
     public final String call;
     
     private FunctionRef ref;
     Variable captured;
-    private boolean defInterface;
+    String defPointer;
 
     public ECapturingFunctionRef(Location location, String type, String call) {
         super(location);
@@ -56,10 +57,16 @@ public class ECapturingFunctionRef extends AExpression {
     void analyze(Locals variables) {
         captured = variables.getVariable(location, type);
         if (expected == null) {
-            defInterface = true;
+            if (captured.type.sort == Definition.Sort.DEF) {
+                // dynamic implementation
+                defPointer = "D" + type + "." + call + ",1";
+            } else {
+                // typed implementation
+                defPointer = "S" + captured.type.name + "." + call + ",1";
+            }
             actual = Definition.getType("String");
         } else {
-            defInterface = false;
+            defPointer = null;
             // static case
             if (captured.type.sort != Definition.Sort.DEF) {
                 try {
@@ -73,24 +80,21 @@ public class ECapturingFunctionRef extends AExpression {
     }
 
     @Override
-    void write(MethodWriter writer) {
+    void write(MethodWriter writer, Globals globals) {
         writer.writeDebugInfo(location);
-        if (defInterface && captured.type.sort == Definition.Sort.DEF) {
-            // dynamic interface, dynamic implementation
-            writer.push("D" + type + "." + call + ",1");
-            writer.visitVarInsn(captured.type.type.getOpcode(Opcodes.ILOAD), captured.slot);
-        } else if (defInterface) {
-            // dynamic interface, typed implementation
-            writer.push("S" + captured.type.name + "." + call + ",1");
-            writer.visitVarInsn(captured.type.type.getOpcode(Opcodes.ILOAD), captured.slot);
+        if (defPointer != null) {
+            // dynamic interface: push captured parameter on stack
+            // TODO: don't do this: its just to cutover :)
+            writer.push((String)null);
+            writer.visitVarInsn(captured.type.type.getOpcode(Opcodes.ILOAD), captured.getSlot());
         } else if (ref == null) {
             // typed interface, dynamic implementation
-            writer.visitVarInsn(captured.type.type.getOpcode(Opcodes.ILOAD), captured.slot);
+            writer.visitVarInsn(captured.type.type.getOpcode(Opcodes.ILOAD), captured.getSlot());
             String descriptor = Type.getMethodType(expected.type, captured.type.type).getDescriptor();
-            writer.invokeDynamic(call, descriptor, DEF_BOOTSTRAP_HANDLE, (Object)DefBootstrap.REFERENCE, expected.name);
+            writer.invokeDynamic(call, descriptor, DEF_BOOTSTRAP_HANDLE, DefBootstrap.REFERENCE, expected.name);
         } else {
             // typed interface, typed implementation
-            writer.visitVarInsn(captured.type.type.getOpcode(Opcodes.ILOAD), captured.slot);
+            writer.visitVarInsn(captured.type.type.getOpcode(Opcodes.ILOAD), captured.getSlot());
             // convert MethodTypes to asm Type for the constant pool.
             String invokedType = ref.invokedType.toMethodDescriptorString();
             Type samMethodType = Type.getMethodType(ref.samMethodType.toMethodDescriptorString());
@@ -115,5 +119,15 @@ public class ECapturingFunctionRef extends AExpression {
                                      0);
             }
         }
+    }
+    
+    @Override
+    public String getPointer() {
+        return defPointer;
+    }
+
+    @Override
+    public Type[] getCaptures() {
+        return new Type[] { captured.type.type };
     }
 }
